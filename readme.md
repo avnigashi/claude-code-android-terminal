@@ -1,273 +1,106 @@
-#!/bin/sh
-# Claude Code installer
-# Works on ARM Linux, Android (Termux/proot/chroot), and standard x86 Linux
-# POSIX sh compatible — works under bash, dash, ash, busybox sh
-# Usage: curl -fsSL https://raw.githubusercontent.com/avnigashi/claude-code-android-terminal/main/install.sh | sh
+# Claude Code — Android & ARM Linux Installer
 
-set -e
+> One-line installer for [Claude Code](https://claude.ai/code) that works on Android (Termux/proot), ARM Linux servers, and standard x86 Linux — fixing all the pitfalls the official installer misses.
 
-info()    { printf '[*] %s\n' "$1"; }
-success() { printf '[+] %s\n' "$1"; }
-warn()    { printf '[!] %s\n' "$1"; }
-error()   { printf '[X] %s\n' "$1" >&2; exit 1; }
+```bash
+curl -fsSL https://raw.githubusercontent.com/avnigashi/claude-code-android-terminal/main/install.sh | bash
+```
 
-printf '\n================================\n    Claude Code Installer\n================================\n\n'
+---
 
-# ── 1. Detect environment ────────────────────────────────────────────────────
+## Why this exists
 
-ARCH=$(uname -m)
-IS_TERMUX=0
-IS_PROOT=0
-IS_ROOT=0
-HAS_PKG=0
+The official `curl -fsSL https://claude.ai/install.sh | bash` fails on ARM and Android environments with errors like:
 
-if [ -n "${TERMUX_VERSION:-}" ] || [ -d "/data/data/com.termux" ]; then
-    IS_TERMUX=1
-fi
-if [ "$(id -u)" -eq 0 ]; then
-    IS_ROOT=1
-fi
-if command -v pkg > /dev/null 2>&1; then
-    HAS_PKG=1
-fi
+```
+Illegal instruction
+EACCES: permission denied, mkdir '/usr/local/lib/node_modules'
+```
 
-# Detect proot/chroot: pkg exists at the Termux layer but the current root
-# is different (LD_LIBRARY_PATH won't include Termux libs).
-# Simplest heuristic: if IS_TERMUX but PREFIX is not set or /usr/bin/apt exists.
-if [ "$IS_TERMUX" = "1" ] && [ "$HAS_PKG" = "1" ]; then
-    if [ -f "/usr/bin/apt" ] || [ -z "${PREFIX:-}" ]; then
-        IS_PROOT=1
-        info "proot/chroot environment detected inside Android"
-    fi
-fi
+This installer handles all of that automatically.
 
-info "Detected arch: $ARCH"
-if [ "$IS_TERMUX" = "1" ]; then
-    if [ "$IS_PROOT" = "1" ]; then
-        info "Environment: proot/chroot inside Termux"
-    else
-        info "Environment: native Termux"
-    fi
-fi
+---
 
-# ── 2. Helpers ───────────────────────────────────────────────────────────────
+## What it does
 
-apt_get() {
-    if [ "$IS_ROOT" = "1" ]; then
-        apt-get "$@"
-    else
-        sudo apt-get "$@"
-    fi
-}
+| Step | What happens |
+|------|-------------|
+| 🔍 Detect environment | Identifies arch (ARM64/x86), Termux, and root status |
+| ⚡ Native installer | Tries the official installer first on x86_64 — skips it on ARM/Termux |
+| 📦 Node.js | Installs Node 18+ if missing (`pkg`, `apt`, or `nvm` as fallback) |
+| 🔐 Fix EACCES | Switches npm prefix to `~/.npm-global` — no `sudo` needed |
+| 🛣️ Fix PATH | Adds npm bin to your current session and `.bashrc`/`.zshrc` |
+| 🤖 Fix Termux `/tmp` | Sets `TMPDIR` to the correct Android path so Claude doesn't crash |
+| ✅ Install & verify | Installs `@anthropic-ai/claude-code` via npm and confirms it works |
 
-run_as_root() {
-    if [ "$IS_ROOT" = "1" ]; then
-        "$@"
-    else
-        sudo "$@"
-    fi
-}
+---
 
-# ── 3. Try native installer (x86_64, non-Android only) ───────────────────────
+## Compatibility
 
-if [ "$ARCH" = "x86_64" ] && [ "$IS_TERMUX" = "0" ]; then
-    info "Attempting official native installer..."
-    if curl -fsSL https://claude.ai/install.sh | sh 2>/dev/null; then
-        success "Native installer succeeded!"
-        printf '\nRun: claude\n\n'
-        exit 0
-    else
-        warn "Native installer failed, falling back to npm..."
-    fi
-else
-    warn "Skipping native installer (ARM or Android — using npm instead)"
-fi
+| Platform | Status |
+|----------|--------|
+| Android — Termux | ✅ |
+| Android — proot/chroot (Debian/Ubuntu) | ✅ |
+| ARM64 Linux (servers, SBCs) | ✅ |
+| x86_64 Linux | ✅ |
+| macOS | ⚠️ Use the [official installer](https://claude.ai/code) |
+| Windows | ⚠️ Use the [official installer](https://claude.ai/code) |
 
-# ── 4. Install Node.js ───────────────────────────────────────────────────────
+---
 
-node_version_ok() {
-    if ! command -v node > /dev/null 2>&1; then
-        return 1
-    fi
-    # Also check it actually runs (libcrypto issues cause silent failures)
-    if ! node --version > /dev/null 2>&1; then
-        return 1
-    fi
-    _ver=$(node -e "process.exit(parseInt(process.versions.node) < 18 ? 1 : 0)" 2>/dev/null && echo ok || echo old)
-    [ "$_ver" = "ok" ]
-}
+## After installing
 
-install_node_via_nvm() {
-    info "Installing Node.js via nvm (self-contained, no system lib deps)..."
-    NVM_DIR="$HOME/.nvm"
-    export NVM_DIR
-    curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | sh
-    if [ -s "$NVM_DIR/nvm.sh" ]; then
-        . "$NVM_DIR/nvm.sh"
-        nvm install --lts
-        nvm use --lts
-    else
-        error "nvm install failed — please install Node.js 18+ manually and re-run."
-    fi
-}
+Run `claude` in any project directory and authenticate:
 
-install_node_via_nodesource() {
-    info "Installing Node.js 20 via NodeSource..."
-    apt_get update -qq
-    apt_get install -y ca-certificates curl gnupg
-    curl -fsSL https://deb.nodesource.com/setup_20.x | run_as_root sh
-    apt_get install -y nodejs
-}
+```bash
+claude
+```
 
-install_node() {
-    # Native Termux (not proot): try pkg, but verify node actually runs after
-    if [ "$IS_TERMUX" = "1" ] && [ "$HAS_PKG" = "1" ] && [ "$IS_PROOT" = "0" ]; then
-        info "Installing Node.js via pkg..."
-        pkg install -y openssl-tool nodejs npm 2>/dev/null || pkg install -y nodejs npm
-        if node --version > /dev/null 2>&1; then
-            return
-        fi
-        warn "pkg Node.js failed to run (libcrypto.so.3 missing), falling back to nvm..."
-        install_node_via_nvm
-        return
-    fi
+You'll be prompted to log in with your Claude.ai account (Pro, Max, Teams, or Enterprise required).
 
-    # Debian/Ubuntu (apt) — covers proot inside Termux too
-    if command -v apt-get > /dev/null 2>&1; then
-        if install_node_via_nodesource 2>/dev/null; then
-            if node --version > /dev/null 2>&1; then
-                return
-            fi
-            warn "NodeSource Node.js failed to run, falling back to nvm..."
-        else
-            warn "NodeSource setup failed, trying apt bundled nodejs..."
-            apt_get update -qq && apt_get install -y nodejs npm 2>/dev/null || true
-            if node --version > /dev/null 2>&1; then
-                return
-            fi
-            warn "apt Node.js failed to run, falling back to nvm..."
-        fi
-        install_node_via_nvm
-        return
-    fi
+---
 
-    # Fedora/RHEL (dnf)
-    if command -v dnf > /dev/null 2>&1; then
-        info "Installing Node.js via dnf..."
-        run_as_root dnf install -y nodejs npm
-        return
-    fi
+## Requirements
 
-    # CentOS/older RHEL (yum)
-    if command -v yum > /dev/null 2>&1; then
-        info "Installing Node.js via yum..."
-        run_as_root yum install -y nodejs npm
-        return
-    fi
+- A [Claude Pro, Max, Teams, or Enterprise](https://claude.ai) account — the free plan does not include Claude Code
+- Internet connection
+- `curl` and `bash`
 
-    # Arch (pacman)
-    if command -v pacman > /dev/null 2>&1; then
-        info "Installing Node.js via pacman..."
-        run_as_root pacman -Sy --noconfirm nodejs npm
-        return
-    fi
+---
 
-    # Alpine (apk)
-    if command -v apk > /dev/null 2>&1; then
-        info "Installing Node.js via apk..."
-        run_as_root apk add nodejs npm
-        return
-    fi
+## Troubleshooting
 
-    # Last resort: nvm
-    install_node_via_nvm
-}
+**`command not found: claude` after install**
+```bash
+source ~/.bashrc
+```
 
-if node_version_ok; then
-    success "Node.js $(node --version) OK"
-else
-    if command -v node > /dev/null 2>&1; then
-        warn "Node.js present but unusable or too old, reinstalling..."
-    else
-        warn "Node.js not found, installing..."
-    fi
-    install_node
-fi
-
-# Re-source nvm if node still not in PATH
-if ! node_version_ok; then
-    if [ -s "$HOME/.nvm/nvm.sh" ]; then
-        . "$HOME/.nvm/nvm.sh"
-    fi
-fi
-
-if ! node_version_ok; then
-    error "Node.js 18+ could not be installed. Please install it manually and re-run."
-fi
-
-success "Node.js $(node --version) ready"
-
-# ── 5. Configure user-level npm prefix (avoids EACCES) ──────────────────────
-
-NPM_PREFIX=$(npm config get prefix 2>/dev/null || echo "")
-
-case "$NPM_PREFIX" in
-    /usr*|/usr/local*)
-        warn "npm prefix is system-wide ($NPM_PREFIX), switching to ~/.npm-global..."
-        mkdir -p "$HOME/.npm-global"
-        npm config set prefix "$HOME/.npm-global"
-        NPM_BIN="$HOME/.npm-global/bin"
-        ;;
-    *)
-        NPM_BIN="$(npm config get prefix)/bin"
-        ;;
-esac
-
-# ── 6. Add npm bin to PATH ────────────────────────────────────────────────────
-
-export PATH="$NPM_BIN:$PATH"
-
-if [ -n "${BASH_VERSION:-}" ]; then
-    RC_FILE="$HOME/.bashrc"
-elif [ -n "${ZSH_VERSION:-}" ]; then
-    RC_FILE="$HOME/.zshrc"
-elif [ -f "$HOME/.bashrc" ]; then
-    RC_FILE="$HOME/.bashrc"
-else
-    RC_FILE="$HOME/.profile"
-fi
-
-if ! grep -qF "$NPM_BIN" "$RC_FILE" 2>/dev/null; then
-    printf '\n# Added by Claude Code installer\nexport PATH="%s:$PATH"\n' "$NPM_BIN" >> "$RC_FILE"
-    info "Added PATH entry to $RC_FILE"
-fi
-
-# ── 7. Fix TMPDIR for Android/Termux ─────────────────────────────────────────
-
-if [ "$IS_TERMUX" = "1" ]; then
-    TERMUX_TMPDIR="${PREFIX:-/data/data/com.termux/files/usr}/tmp"
-    mkdir -p "$TERMUX_TMPDIR"
-    export TMPDIR="$TERMUX_TMPDIR"
-    if ! grep -q "TMPDIR" "$RC_FILE" 2>/dev/null; then
-        printf '\n# Fix for Claude Code on Android/Termux\nexport TMPDIR="%s"\n' "$TERMUX_TMPDIR" >> "$RC_FILE"
-        info "Set TMPDIR=$TERMUX_TMPDIR for Android compatibility"
-    fi
-fi
-
-# ── 8. Install Claude Code ───────────────────────────────────────────────────
-
-info "Installing Claude Code..."
+**Still failing on Termux**
+```bash
+export TMPDIR=$PREFIX/tmp
+pkg install nodejs
 npm install -g @anthropic-ai/claude-code
+```
 
-# ── 9. Verify ────────────────────────────────────────────────────────────────
+**Node.js version too old**
+```bash
+# Termux
+pkg install nodejs-lts
 
-if command -v claude > /dev/null 2>&1; then
-    success "Claude Code installed successfully!"
-elif [ -x "$NPM_BIN/claude" ]; then
-    success "Claude Code installed at $NPM_BIN/claude"
-    warn "Open a new shell or run: . $RC_FILE"
-else
-    error "Installation may have failed. Check npm error logs above."
-fi
+# apt
+sudo apt-get install -y nodejs npm
+```
 
-printf '\nAll done! Run: claude\n\n'
+---
+
+## Related issues
+
+- [Hardcoded `/tmp` paths break on Termux](https://github.com/anthropics/claude-code/issues/15637)
+- [EACCES on `/tmp/claude` on Android](https://github.com/anthropics/claude-code/issues/17366)
+- [Startup hang in Termux with Node v24](https://github.com/anthropics/claude-code/issues/23665)
+
+---
+
+## License
+
+MIT
