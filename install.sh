@@ -1,182 +1,258 @@
-#!/usr/bin/env bash
-set -euo pipefail
-
+#!/bin/sh
 # Claude Code installer
-# Works on ARM Linux, Android (Termux/proot), and standard x86 Linux
-# Usage: curl -fsSL https://mygiturl/install.sh | bash
+# Works on ARM Linux, Android (Termux/proot/chroot), and standard x86 Linux
+# POSIX sh compatible — works under bash, dash, ash, busybox sh
+# Usage: curl -fsSL https://raw.githubusercontent.com/avnigashi/claude-code-android-terminal/main/install.sh | sh
 
-BOLD='\033[1m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-RED='\033[0;31m'
-NC='\033[0m'
+set -e
 
-info()    { echo -e "${BOLD}[•] $1${NC}"; }
-success() { echo -e "${GREEN}[✓] $1${NC}"; }
-warn()    { echo -e "${YELLOW}[!] $1${NC}"; }
-error()   { echo -e "${RED}[✗] $1${NC}"; exit 1; }
+info()    { printf '[*] %s\n' "$1"; }
+success() { printf '[+] %s\n' "$1"; }
+warn()    { printf '[!] %s\n' "$1"; }
+error()   { printf '[X] %s\n' "$1" >&2; exit 1; }
 
-echo ""
-echo -e "${BOLD}╔══════════════════════════════════╗${NC}"
-echo -e "${BOLD}║     Claude Code Installer        ║${NC}"
-echo -e "${BOLD}╚══════════════════════════════════╝${NC}"
-echo ""
+printf '\n================================\n    Claude Code Installer\n================================\n\n'
 
 # ── 1. Detect environment ────────────────────────────────────────────────────
 
 ARCH=$(uname -m)
-IS_TERMUX=false
-IS_ROOT=false
+IS_TERMUX=0
+IS_ROOT=0
 
-[[ -n "${TERMUX_VERSION:-}" || -d "/data/data/com.termux" ]] && IS_TERMUX=true
-[[ "$(id -u)" -eq 0 ]] && IS_ROOT=true
+if [ -n "${TERMUX_VERSION:-}" ] || [ -d "/data/data/com.termux" ]; then
+    IS_TERMUX=1
+fi
+if [ "$(id -u)" -eq 0 ]; then
+    IS_ROOT=1
+fi
 
 info "Detected arch: $ARCH"
-$IS_TERMUX && info "Termux environment detected"
+if [ "$IS_TERMUX" = "1" ]; then
+    info "Android/Termux environment detected"
+fi
 
-# ── 2. Try native installer first (x86_64 non-Termux only) ──────────────────
+# ── 2. Helpers ───────────────────────────────────────────────────────────────
 
-if [[ "$ARCH" == "x86_64" ]] && ! $IS_TERMUX; then
-    info "Attempting native installer..."
-    if curl -fsSL https://claude.ai/install.sh | bash 2>/dev/null; then
+apt_get() {
+    if [ "$IS_ROOT" = "1" ]; then
+        apt-get "$@"
+    else
+        sudo apt-get "$@"
+    fi
+}
+
+run_as_root() {
+    if [ "$IS_ROOT" = "1" ]; then
+        "$@"
+    else
+        sudo "$@"
+    fi
+}
+
+# Check node exists AND actually executes (catches libcrypto-style failures)
+node_runs() {
+    command -v node > /dev/null 2>&1 && node --version > /dev/null 2>&1
+}
+
+node_version_ok() {
+    node_runs || return 1
+    _ver=$(node -e "process.exit(parseInt(process.versions.node) < 18 ? 1 : 0)" 2>/dev/null && echo ok || echo old)
+    [ "$_ver" = "ok" ]
+}
+
+# ── 3. Try native installer (x86_64, non-Android only) ───────────────────────
+
+if [ "$ARCH" = "x86_64" ] && [ "$IS_TERMUX" = "0" ]; then
+    info "Attempting official native installer..."
+    if curl -fsSL https://claude.ai/install.sh | sh 2>/dev/null; then
         success "Native installer succeeded!"
-        echo ""
-        echo -e "${GREEN}Run: ${BOLD}claude${NC}"
+        printf '\nRun: claude\n\n'
         exit 0
     else
         warn "Native installer failed, falling back to npm..."
     fi
 else
-    warn "Skipping native installer (ARM or Termux — using npm instead)"
+    warn "Skipping native installer (ARM or Android — using npm instead)"
 fi
 
-# ── 3. Ensure Node.js is available ──────────────────────────────────────────
+# ── 4. Install Node.js ───────────────────────────────────────────────────────
 
-install_node_apt() {
-    info "Installing Node.js via apt..."
-    if $IS_ROOT; then
-        apt-get update -qq && apt-get install -y nodejs npm
+install_node_via_nvm() {
+    info "Installing Node.js via nvm (self-contained, no system lib deps)..."
+    NVM_DIR="$HOME/.nvm"
+    export NVM_DIR
+    curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | sh
+    if [ -s "$NVM_DIR/nvm.sh" ]; then
+        . "$NVM_DIR/nvm.sh"
+        nvm install --lts
+        nvm use --lts
     else
-        sudo apt-get update -qq && sudo apt-get install -y nodejs npm
+        error "nvm install failed — please install Node.js 18+ manually and re-run."
     fi
 }
 
-install_node_termux() {
-    info "Installing Node.js via pkg..."
-    pkg install -y nodejs npm
+install_node_via_nodesource() {
+    info "Installing Node.js 20 via NodeSource..."
+    apt_get update -qq
+    apt_get install -y ca-certificates curl gnupg
+    curl -fsSL https://deb.nodesource.com/setup_20.x | run_as_root sh
+    apt_get install -y nodejs
 }
 
-install_node_nvm() {
-    info "Installing Node.js via nvm..."
-    export NVM_DIR="$HOME/.nvm"
-    curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
-    # shellcheck source=/dev/null
-    source "$NVM_DIR/nvm.sh"
-    nvm install --lts
-    nvm use --lts
-}
-
-if ! command -v node &>/dev/null; then
-    warn "Node.js not found"
-    if $IS_TERMUX; then
-        install_node_termux
-    elif command -v apt-get &>/dev/null; then
-        install_node_apt
-    else
-        install_node_nvm
-    fi
-else
-    NODE_VER=$(node -e "process.exit(parseInt(process.versions.node) < 18 ? 1 : 0)" 2>/dev/null && echo ok || echo old)
-    if [[ "$NODE_VER" == "old" ]]; then
-        warn "Node.js $(node --version) is too old (need 18+), upgrading..."
-        if $IS_TERMUX; then
-            install_node_termux
-        elif command -v apt-get &>/dev/null; then
-            install_node_apt
-        else
-            install_node_nvm
+install_node() {
+    # --- Termux native pkg (only if pkg is Termux's real pkg, not apt's) ---
+    if [ "$IS_TERMUX" = "1" ] && command -v pkg > /dev/null 2>&1 && [ -n "${PREFIX:-}" ]; then
+        info "Trying pkg (native Termux)..."
+        pkg install -y openssl-tool nodejs npm 2>/dev/null || pkg install -y nodejs npm 2>/dev/null || true
+        if node_runs; then
+            return
         fi
+        warn "pkg Node.js failed to run (libcrypto missing in proot?), trying nvm..."
+        install_node_via_nvm
+        return
+    fi
+
+    # --- apt (Debian/Ubuntu/proot) ---
+    if command -v apt-get > /dev/null 2>&1; then
+        # Try NodeSource first for a modern Node 20
+        if install_node_via_nodesource 2>/dev/null && node_runs; then
+            return
+        fi
+        warn "NodeSource failed or node won't run, trying nvm..."
+        install_node_via_nvm
+        return
+    fi
+
+    # --- dnf (Fedora/RHEL) ---
+    if command -v dnf > /dev/null 2>&1; then
+        info "Installing Node.js via dnf..."
+        run_as_root dnf install -y nodejs npm
+        node_runs && return
+        warn "dnf Node.js won't run, trying nvm..."
+        install_node_via_nvm
+        return
+    fi
+
+    # --- yum (CentOS/older RHEL) ---
+    if command -v yum > /dev/null 2>&1; then
+        info "Installing Node.js via yum..."
+        run_as_root yum install -y nodejs npm
+        node_runs && return
+        install_node_via_nvm
+        return
+    fi
+
+    # --- pacman (Arch) ---
+    if command -v pacman > /dev/null 2>&1; then
+        info "Installing Node.js via pacman..."
+        run_as_root pacman -Sy --noconfirm nodejs npm
+        node_runs && return
+        install_node_via_nvm
+        return
+    fi
+
+    # --- apk (Alpine) ---
+    if command -v apk > /dev/null 2>&1; then
+        info "Installing Node.js via apk..."
+        run_as_root apk add nodejs npm
+        node_runs && return
+        install_node_via_nvm
+        return
+    fi
+
+    # --- last resort ---
+    install_node_via_nvm
+}
+
+if node_version_ok; then
+    success "Node.js $(node --version) OK"
+else
+    if command -v node > /dev/null 2>&1 && ! node_runs; then
+        warn "Node.js is installed but won't execute (library missing?) — using nvm instead"
+        install_node_via_nvm
+    elif command -v node > /dev/null 2>&1; then
+        warn "Node.js $(node --version) is too old (need 18+), upgrading..."
+        install_node
     else
-        success "Node.js $(node --version) OK"
+        warn "Node.js not found, installing..."
+        install_node
     fi
 fi
 
-# ── 4. Configure user-level npm prefix (avoids EACCES) ──────────────────────
+# Re-source nvm if node still not in PATH
+if ! node_version_ok; then
+    if [ -s "$HOME/.nvm/nvm.sh" ]; then
+        . "$HOME/.nvm/nvm.sh"
+    fi
+fi
+
+if ! node_version_ok; then
+    error "Node.js 18+ could not be installed. Please install it manually and re-run."
+fi
+
+success "Node.js $(node --version) ready"
+
+# ── 5. Configure user-level npm prefix (avoids EACCES) ──────────────────────
 
 NPM_PREFIX=$(npm config get prefix 2>/dev/null || echo "")
 
-if [[ "$NPM_PREFIX" == "/usr"* || "$NPM_PREFIX" == "/usr/local"* ]]; then
-    warn "npm prefix is system-wide ($NPM_PREFIX), switching to user-local..."
-    mkdir -p "$HOME/.npm-global"
-    npm config set prefix "$HOME/.npm-global"
-    NPM_BIN="$HOME/.npm-global/bin"
+case "$NPM_PREFIX" in
+    /usr*|/usr/local*)
+        warn "npm prefix is system-wide ($NPM_PREFIX), switching to ~/.npm-global..."
+        mkdir -p "$HOME/.npm-global"
+        npm config set prefix "$HOME/.npm-global"
+        NPM_BIN="$HOME/.npm-global/bin"
+        ;;
+    *)
+        NPM_BIN="$(npm config get prefix)/bin"
+        ;;
+esac
+
+# ── 6. Add npm bin to PATH ────────────────────────────────────────────────────
+
+export PATH="$NPM_BIN:$PATH"
+
+if [ -n "${BASH_VERSION:-}" ]; then
+    RC_FILE="$HOME/.bashrc"
+elif [ -n "${ZSH_VERSION:-}" ]; then
+    RC_FILE="$HOME/.zshrc"
+elif [ -f "$HOME/.bashrc" ]; then
+    RC_FILE="$HOME/.bashrc"
 else
-    NPM_BIN="$(npm config get prefix)/bin"
+    RC_FILE="$HOME/.profile"
 fi
 
-# ── 5. Add npm bin to PATH (current session + shell rc file) ─────────────────
+if ! grep -qF "$NPM_BIN" "$RC_FILE" 2>/dev/null; then
+    printf '\n# Added by Claude Code installer\nexport PATH="%s:$PATH"\n' "$NPM_BIN" >> "$RC_FILE"
+    info "Added PATH entry to $RC_FILE"
+fi
 
-add_to_path() {
-    local line='export PATH="'"$NPM_BIN"':$PATH"'
+# ── 7. Fix TMPDIR for Android/Termux ─────────────────────────────────────────
 
-    # Current session
-    export PATH="$NPM_BIN:$PATH"
-
-    # Detect shell rc file
-    local rcfile=""
-    if [[ -n "${BASH_VERSION:-}" ]]; then
-        rcfile="$HOME/.bashrc"
-    elif [[ -n "${ZSH_VERSION:-}" ]]; then
-        rcfile="$HOME/.zshrc"
-    else
-        rcfile="$HOME/.profile"
-    fi
-
-    if [[ -f "$rcfile" ]] && grep -qF "$NPM_BIN" "$rcfile" 2>/dev/null; then
-        : # Already present
-    else
-        echo "" >> "$rcfile"
-        echo "# Added by Claude Code installer" >> "$rcfile"
-        echo "$line" >> "$rcfile"
-        info "Added PATH entry to $rcfile"
-    fi
-}
-
-add_to_path
-
-# ── 6. Set TMPDIR for Android/Termux ────────────────────────────────────────
-
-if $IS_TERMUX; then
+if [ "$IS_TERMUX" = "1" ]; then
     TERMUX_TMPDIR="${PREFIX:-/data/data/com.termux/files/usr}/tmp"
     mkdir -p "$TERMUX_TMPDIR"
     export TMPDIR="$TERMUX_TMPDIR"
-
-    # Persist it
-    RCFILE="$HOME/.bashrc"
-    if ! grep -q "TMPDIR" "$RCFILE" 2>/dev/null; then
-        echo "" >> "$RCFILE"
-        echo "# Fix for Claude Code on Termux" >> "$RCFILE"
-        echo "export TMPDIR=\"$TERMUX_TMPDIR\"" >> "$RCFILE"
-        info "Set TMPDIR for Termux compatibility"
+    if ! grep -q "TMPDIR" "$RC_FILE" 2>/dev/null; then
+        printf '\n# Fix for Claude Code on Android/Termux\nexport TMPDIR="%s"\n' "$TERMUX_TMPDIR" >> "$RC_FILE"
+        info "Set TMPDIR=$TERMUX_TMPDIR for Android compatibility"
     fi
 fi
 
-# ── 7. Install Claude Code ───────────────────────────────────────────────────
+# ── 8. Install Claude Code ───────────────────────────────────────────────────
 
 info "Installing Claude Code..."
 npm install -g @anthropic-ai/claude-code
 
-# ── 8. Verify ────────────────────────────────────────────────────────────────
+# ── 9. Verify ────────────────────────────────────────────────────────────────
 
-if command -v claude &>/dev/null; then
-    success "Claude Code $(claude --version 2>/dev/null || echo '') installed!"
-elif [[ -x "$NPM_BIN/claude" ]]; then
+if command -v claude > /dev/null 2>&1; then
+    success "Claude Code installed successfully!"
+elif [ -x "$NPM_BIN/claude" ]; then
     success "Claude Code installed at $NPM_BIN/claude"
-    warn "Restart your shell or run: source ~/.bashrc"
+    warn "Open a new shell or run: . $RC_FILE"
 else
-    error "Installation may have failed. Check npm logs."
+    error "Installation may have failed. Check npm error logs above."
 fi
 
-echo ""
-echo -e "${GREEN}${BOLD}All done! Run: claude${NC}"
-echo ""
+printf '\nAll done! Run: claude\n\n'
